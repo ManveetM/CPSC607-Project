@@ -6,6 +6,7 @@ Next there will be some embedded [visualizations/showcases](#results) of the pro
 
 ## What this project includes
 
+- Final project [report](Report.pdf)
 - 2D GNCA training in PyTorch
 - growth-only and regeneration training
 - two damage modes for regeneration:
