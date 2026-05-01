@@ -171,4 +171,11 @@ There are already multiple runs in `outputs/`, including growth, circle regenera
 
 ### Examples of Regeneration
 
-****Lizard****
+****Lizard****  
+https://github.com/user-attachments/assets/aaaa8286-64f6-4e64-8a46-2dc19b69c153
+
+****Vista****  
+https://github.com/user-attachments/assets/83519927-6ff7-497a-b26b-0d9e46af1c77
+
+****Tiger****  
+https://github.com/user-attachments/assets/2c6536df-8c93-43c4-8674-0951652fe38f
