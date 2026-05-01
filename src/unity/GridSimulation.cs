@@ -15,7 +15,9 @@ public class GridSimulation : MonoBehaviour
     [Header("Backend")]
     [SerializeField] private SimulationBackend simulationBackend = SimulationBackend.LearnedNcaCompute;
     [SerializeField] private TextAsset learnedModelJson;
+    [SerializeField] private TextAsset[] bundledModelJsons;
     [SerializeField] private ComputeShader learnedNcaComputeShader;
+    [SerializeField] private Shader learnedNcaDisplayShader;
     [SerializeField] private bool useModelRecommendedSize = true;
     [SerializeField] private bool autoSeedOnStart = true;
     [SerializeField] private bool stochasticUpdates = true;
@@ -31,6 +33,10 @@ public class GridSimulation : MonoBehaviour
     [Header("Simulation")]
     [SerializeField] private float updateInterval = 0.05f;
     [SerializeField] private bool runState = false;
+
+    [Header("Runtime Controls")]
+    [SerializeField] private bool enableRuntimeHotkeys = true;
+    [SerializeField] private bool showRuntimeOverlay = true;
 
     [Header("Hand-Authored Rule")]
     [SerializeField] private float diffusionRate = 0.20f;
@@ -79,20 +85,11 @@ public class GridSimulation : MonoBehaviour
     private int paintKernel;
 
     private NcaUnityModel loadedModel;
+    private int activeBundledModelIndex = -1;
 
     private void Start()
     {
-        InitializeBackend();
-        InitializeSimulation();
-
-        if (autoSeedOnStart)
-        {
-            SeedCenter();
-        }
-        else
-        {
-            RenderState();
-        }
+        ReinitializeSimulation(autoSeedOnStart);
     }
 
     private void Update()
@@ -102,6 +99,7 @@ public class GridSimulation : MonoBehaviour
             return;
         }
 
+        HandleRuntimeHotkeys();
         HandleInput();
 
         if (runState)
@@ -112,34 +110,14 @@ public class GridSimulation : MonoBehaviour
 
     private void OnDestroy()
     {
-        ReleaseGpuResources();
-
-        if (runtimeSpriteMaterial != null)
-        {
-            Destroy(runtimeSpriteMaterial);
-        }
-
-        if (cpuTexture != null)
-        {
-            Destroy(cpuTexture);
-        }
-
-        if (spriteProxyTexture != null)
-        {
-            Destroy(spriteProxyTexture);
-        }
-
-        if (gpuDisplayTexture != null)
-        {
-            gpuDisplayTexture.Release();
-            Destroy(gpuDisplayTexture);
-        }
+        CleanupSimulationResources();
     }
 
     private void InitializeBackend()
     {
         random = randomSeed == 0 ? new System.Random() : new System.Random(randomSeed);
         stepCounter = 0;
+        SyncActiveBundledModelIndex();
 
         if (!UsesLearnedModel())
         {
@@ -215,6 +193,7 @@ public class GridSimulation : MonoBehaviour
             wrapMode = TextureWrapMode.Clamp
         };
 
+        spriteRenderer.sharedMaterial = null;
         ClearState();
         AssignSpriteTexture(cpuTexture);
     }
@@ -262,7 +241,9 @@ public class GridSimulation : MonoBehaviour
         spriteProxyTexture.SetPixels32(pixels);
         spriteProxyTexture.Apply();
 
-        Shader displayShader = Shader.Find("Unlit/NcaDisplay");
+        Shader displayShader = learnedNcaDisplayShader != null
+            ? learnedNcaDisplayShader
+            : Shader.Find("Unlit/NcaDisplay");
         if (displayShader == null)
         {
             Debug.LogWarning("Unlit/NcaDisplay shader not found. Falling back to CPU learned NCA.");
@@ -351,6 +332,85 @@ public class GridSimulation : MonoBehaviour
         buffer = null;
     }
 
+    private void CleanupSimulationResources()
+    {
+        ReleaseGpuResources();
+
+        if (runtimeSpriteMaterial != null)
+        {
+            Destroy(runtimeSpriteMaterial);
+            runtimeSpriteMaterial = null;
+        }
+
+        if (cpuTexture != null)
+        {
+            Destroy(cpuTexture);
+            cpuTexture = null;
+        }
+
+        if (spriteProxyTexture != null)
+        {
+            Destroy(spriteProxyTexture);
+            spriteProxyTexture = null;
+        }
+
+        if (gpuDisplayTexture != null)
+        {
+            gpuDisplayTexture.Release();
+            Destroy(gpuDisplayTexture);
+            gpuDisplayTexture = null;
+        }
+
+        currentState = null;
+        nextState = null;
+        preLifeMask = null;
+        postLifeMask = null;
+        perceptionBuffer = null;
+        hiddenBuffer = null;
+        loadedModel = null;
+
+        if (spriteRenderer != null)
+        {
+            spriteRenderer.sharedMaterial = null;
+        }
+    }
+
+    private void ReinitializeSimulation(bool seedOnStart)
+    {
+        timer = 0f;
+        CleanupSimulationResources();
+        InitializeBackend();
+        InitializeSimulation();
+        Debug.Log($"GridSimulation initialized with backend: {simulationBackend} | model: {GetCurrentModelName()}");
+
+        if (seedOnStart)
+        {
+            SeedCenter();
+        }
+        else
+        {
+            RenderState();
+        }
+    }
+
+    private void SyncActiveBundledModelIndex()
+    {
+        activeBundledModelIndex = -1;
+        if (bundledModelJsons == null || learnedModelJson == null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < bundledModelJsons.Length; i++)
+        {
+            if (bundledModelJsons[i] == learnedModelJson)
+            {
+                activeBundledModelIndex = i;
+                return;
+            }
+        }
+    }
+
     private bool IsDisplayReady()
     {
         return simulationBackend == SimulationBackend.LearnedNcaCompute ? gpuDisplayTexture != null : cpuTexture != null;
@@ -408,6 +468,76 @@ public class GridSimulation : MonoBehaviour
         {
             PaintCellsOff(x, y, Mathf.Max(0, eraseRadius));
             RenderState();
+        }
+    }
+
+    private void HandleRuntimeHotkeys()
+    {
+        if (!enableRuntimeHotkeys)
+        {
+            return;
+        }
+
+        Keyboard keyboard = Keyboard.current;
+        if (keyboard == null)
+        {
+            return;
+        }
+
+        if (keyboard.spaceKey.wasPressedThisFrame)
+        {
+            ToggleRunState();
+        }
+
+        if (keyboard.rKey.wasPressedThisFrame)
+        {
+            ClearState();
+            SeedCenter();
+        }
+
+        if (keyboard.cKey.wasPressedThisFrame)
+        {
+            ClearState();
+        }
+
+        if (keyboard.hKey.wasPressedThisFrame)
+        {
+            showRuntimeOverlay = !showRuntimeOverlay;
+        }
+
+        if (keyboard.leftBracketKey.wasPressedThisFrame)
+        {
+            eraseRadius = Mathf.Max(1, eraseRadius - 1);
+        }
+
+        if (keyboard.rightBracketKey.wasPressedThisFrame)
+        {
+            eraseRadius++;
+        }
+
+        if (keyboard.minusKey.wasPressedThisFrame)
+        {
+            updateInterval = Mathf.Min(1f, updateInterval + 0.01f);
+        }
+
+        if (keyboard.equalsKey.wasPressedThisFrame || keyboard.numpadPlusKey.wasPressedThisFrame)
+        {
+            updateInterval = Mathf.Max(0.001f, updateInterval - 0.01f);
+        }
+
+        if (keyboard.bKey.wasPressedThisFrame)
+        {
+            ToggleLearnedBackend();
+        }
+
+        if (keyboard.nKey.wasPressedThisFrame)
+        {
+            CycleBundledModel(1);
+        }
+
+        if (keyboard.pKey.wasPressedThisFrame)
+        {
+            CycleBundledModel(-1);
         }
     }
 
@@ -898,6 +1028,68 @@ public class GridSimulation : MonoBehaviour
     public void ToggleRunState()
     {
         runState = !runState;
+    }
+
+    public void ToggleLearnedBackend()
+    {
+        if (!UsesLearnedModel())
+        {
+            return;
+        }
+
+        simulationBackend = simulationBackend == SimulationBackend.LearnedNcaCompute
+            ? SimulationBackend.LearnedNcaCpu
+            : SimulationBackend.LearnedNcaCompute;
+
+        ReinitializeSimulation(true);
+    }
+
+    public void CycleBundledModel(int direction)
+    {
+        if (bundledModelJsons == null || bundledModelJsons.Length == 0)
+        {
+            return;
+        }
+
+        if (activeBundledModelIndex < 0)
+        {
+            SyncActiveBundledModelIndex();
+        }
+
+        int startIndex = activeBundledModelIndex >= 0 ? activeBundledModelIndex : 0;
+        int nextIndex = (startIndex + direction + bundledModelJsons.Length) % bundledModelJsons.Length;
+        activeBundledModelIndex = nextIndex;
+        learnedModelJson = bundledModelJsons[nextIndex];
+        ReinitializeSimulation(true);
+    }
+
+    private string GetCurrentModelName()
+    {
+        return learnedModelJson != null ? learnedModelJson.name : "None";
+    }
+
+    private void OnGUI()
+    {
+        if (!showRuntimeOverlay)
+        {
+            return;
+        }
+
+        const float panelWidth = 420f;
+        const float panelHeight = 180f;
+        GUI.Box(new Rect(12f, 12f, panelWidth, panelHeight), "NCA Controls");
+
+        string overlayText =
+            $"Model: {GetCurrentModelName()}\n" +
+            $"Backend: {simulationBackend}\n" +
+            $"Running: {(runState ? "Yes" : "No")} | Step Interval: {updateInterval:F3}s\n" +
+            $"Paint Radius: {paintRadius} | Erase Radius: {eraseRadius}\n" +
+            $"Space: Play/Pause | R: Reset+Seed | C: Clear | H: Hide Overlay\n" +
+            $"[: Smaller Erase | ]: Larger Erase | -/+: Slower/Faster\n" +
+            $"B: Toggle CPU/Compute | P/N: Prev/Next Model\n" +
+            $"Mouse Left: Seed/Paint | Mouse Right: Damage";
+
+        GUI.Label(new Rect(24f, 40f, panelWidth - 24f, panelHeight - 24f), overlayText);
     }
 
     private int GetAlphaChannel()
