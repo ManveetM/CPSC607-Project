@@ -1,0 +1,40 @@
+{
+  "model_config": {
+    "channel_n": 16,
+    "hidden_n": 128,
+    "fire_rate": 0.5,
+    "target_size": 64,
+    "target_padding": 16,
+    "alpha_channel": 3,
+    "living_threshold": 0.1
+  },
+  "training_config": {
+    "output_dir": "outputs/vista_regen_dropout_64",
+    "target_shape": "disk",
+    "target_image": "images/vista.png",
+    "batch_size": 8,
+    "pool_size": 1024,
+    "train_steps": 10000,
+    "min_iter": 64,
+    "max_iter": 96,
+    "damage_n": 3,
+    "damage_mode": "dropout",
+    "dropout_p_min": 0.05,
+    "dropout_p_max": 0.3,
+    "learning_rate": 0.002,
+    "lr_decay_step": 7000,
+    "lr_decay_factor": 0.1,
+    "preview_every": 100,
+    "save_every": 500,
+    "rollout_steps": 96,
+    "eval_every": 250,
+    "eval_horizons": [
+      96,
+      200,
+      400
+    ],
+    "eval_rollouts": 4,
+    "seed": 0,
+    "device": "cuda"
+  }
+}

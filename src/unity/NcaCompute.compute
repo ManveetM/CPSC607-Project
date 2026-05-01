@@ -1,0 +1,251 @@
+#pragma kernel StepNca
+#pragma kernel ApplyLifeMask
+#pragma kernel RenderState
+#pragma kernel ClearState
+#pragma kernel PaintBrush
+
+#define MAX_CHANNELS 32
+#define MAX_HIDDEN 256
+#define MAX_FEATURES 96
+
+StructuredBuffer<float> _CurrentState;
+RWStructuredBuffer<float> _NextState;
+RWStructuredBuffer<float> _State;
+RWStructuredBuffer<float> _MaskedState;
+StructuredBuffer<float> _Conv1Weight;
+StructuredBuffer<float> _Conv1Bias;
+StructuredBuffer<float> _Conv2Weight;
+StructuredBuffer<float> _Conv2Bias;
+StructuredBuffer<float> _DxKernel;
+StructuredBuffer<float> _DyKernel;
+RWTexture2D<float4> _Result;
+
+int _Width;
+int _Height;
+int _ChannelCount;
+int _HiddenN;
+int _PerceptionFeatureCount;
+int _AlphaChannel;
+float _FireRate;
+float _LivingThreshold;
+float _LearnedStepSize;
+int _UseStochasticUpdates;
+int _StepIndex;
+float _PaintValue;
+int _BrushCenterX;
+int _BrushCenterY;
+int _BrushRadius;
+int _BrushMode;
+
+int StateIndex(int x, int y, int c)
+{
+    return ((y * _Width) + x) * _ChannelCount + c;
+}
+
+float SampleState(StructuredBuffer<float> buffer, int x, int y, int c)
+{
+    if (x < 0 || x >= _Width || y < 0 || y >= _Height || c < 0 || c >= _ChannelCount)
+    {
+        return 0.0;
+    }
+
+    return buffer[StateIndex(x, y, c)];
+}
+
+float SampleRwState(RWStructuredBuffer<float> buffer, int x, int y, int c)
+{
+    if (x < 0 || x >= _Width || y < 0 || y >= _Height || c < 0 || c >= _ChannelCount)
+    {
+        return 0.0;
+    }
+
+    return buffer[StateIndex(x, y, c)];
+}
+
+bool IsLiving(StructuredBuffer<float> buffer, int x, int y)
+{
+    float maxAlpha = 0.0;
+    for (int ox = -1; ox <= 1; ox++)
+    {
+        for (int oy = -1; oy <= 1; oy++)
+        {
+            maxAlpha = max(maxAlpha, SampleState(buffer, x + ox, y + oy, _AlphaChannel));
+        }
+    }
+
+    return maxAlpha > _LivingThreshold;
+}
+
+bool IsLivingRw(RWStructuredBuffer<float> buffer, int x, int y)
+{
+    float maxAlpha = 0.0;
+    for (int ox = -1; ox <= 1; ox++)
+    {
+        for (int oy = -1; oy <= 1; oy++)
+        {
+            maxAlpha = max(maxAlpha, SampleRwState(buffer, x + ox, y + oy, _AlphaChannel));
+        }
+    }
+
+    return maxAlpha > _LivingThreshold;
+}
+
+float Hash01(int x, int y, int stepIndex)
+{
+    float3 value = float3((float)x * 12.9898, (float)y * 78.233, (float)stepIndex * 37.719);
+    return frac(sin(dot(value, float3(1.0, 1.0, 1.0))) * 43758.5453);
+}
+
+[numthreads(8, 8, 1)]
+void StepNca(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+    {
+        return;
+    }
+
+    float perception[MAX_FEATURES];
+    float hidden[MAX_HIDDEN];
+
+    for (int i = 0; i < MAX_FEATURES; i++)
+    {
+        perception[i] = 0.0;
+    }
+
+    for (int h = 0; h < MAX_HIDDEN; h++)
+    {
+        hidden[h] = 0.0;
+    }
+
+    for (int c = 0; c < _ChannelCount; c++)
+    {
+        float identity = SampleState(_CurrentState, id.x, id.y, c);
+        float dx = 0.0;
+        float dy = 0.0;
+
+        for (int ky = 0; ky < 3; ky++)
+        {
+            for (int kx = 0; kx < 3; kx++)
+            {
+                int kernelIndex = (ky * 3) + kx;
+                float sample = SampleState(_CurrentState, (int)id.x + kx - 1, (int)id.y + ky - 1, c);
+                dx += sample * _DxKernel[kernelIndex];
+                dy += sample * _DyKernel[kernelIndex];
+            }
+        }
+
+        int featureOffset = c * 3;
+        perception[featureOffset] = identity;
+        perception[featureOffset + 1] = dx;
+        perception[featureOffset + 2] = dy;
+    }
+
+    for (int h = 0; h < _HiddenN; h++)
+    {
+        float value = _Conv1Bias[h];
+        int weightOffset = h * _PerceptionFeatureCount;
+        for (int f = 0; f < _PerceptionFeatureCount; f++)
+        {
+            value += _Conv1Weight[weightOffset + f] * perception[f];
+        }
+
+        hidden[h] = max(0.0, value);
+    }
+
+    bool applyUpdate = _UseStochasticUpdates == 0 || Hash01(id.x, id.y, _StepIndex) <= _FireRate;
+
+    for (int c = 0; c < _ChannelCount; c++)
+    {
+        float delta = 0.0;
+        if (applyUpdate)
+        {
+            int weightOffset = c * _HiddenN;
+            delta = _Conv2Bias[c];
+            for (int h = 0; h < _HiddenN; h++)
+            {
+                delta += _Conv2Weight[weightOffset + h] * hidden[h];
+            }
+        }
+
+        int stateIndex = StateIndex(id.x, id.y, c);
+        _NextState[stateIndex] = _CurrentState[stateIndex] + (delta * _LearnedStepSize);
+    }
+}
+
+[numthreads(8, 8, 1)]
+void ApplyLifeMask(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+    {
+        return;
+    }
+
+    bool preLife = IsLiving(_CurrentState, id.x, id.y);
+    bool postLife = IsLivingRw(_NextState, id.x, id.y);
+
+    for (int c = 0; c < _ChannelCount; c++)
+    {
+        int index = StateIndex(id.x, id.y, c);
+        _MaskedState[index] = preLife && postLife ? _NextState[index] : 0.0;
+    }
+}
+
+[numthreads(8, 8, 1)]
+void RenderState(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+    {
+        return;
+    }
+
+    float alpha = saturate(_CurrentState[StateIndex(id.x, id.y, _AlphaChannel)]);
+    float r = saturate(1.0 - alpha + _CurrentState[StateIndex(id.x, id.y, 0)]);
+    float g = saturate(1.0 - alpha + _CurrentState[StateIndex(id.x, id.y, 1)]);
+    float b = saturate(1.0 - alpha + _CurrentState[StateIndex(id.x, id.y, 2)]);
+    uint2 outCoord = uint2(id.x, (_Height - 1) - id.y);
+    _Result[outCoord] = float4(r, g, b, 1.0);
+}
+
+[numthreads(8, 8, 1)]
+void ClearState(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+    {
+        return;
+    }
+
+    for (int c = 0; c < _ChannelCount; c++)
+    {
+        _State[StateIndex(id.x, id.y, c)] = 0.0;
+    }
+}
+
+[numthreads(8, 8, 1)]
+void PaintBrush(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+    {
+        return;
+    }
+
+    int dx = (int)id.x - _BrushCenterX;
+    int dy = (int)id.y - _BrushCenterY;
+    if ((dx * dx) + (dy * dy) > (_BrushRadius * _BrushRadius))
+    {
+        return;
+    }
+
+    if (_BrushMode == 0)
+    {
+        for (int c = 0; c < _ChannelCount; c++)
+        {
+            _State[StateIndex(id.x, id.y, c)] = 0.0;
+        }
+        return;
+    }
+
+    for (int c = 0; c < _ChannelCount; c++)
+    {
+        _State[StateIndex(id.x, id.y, c)] = c >= _AlphaChannel ? _PaintValue : 0.0;
+    }
+}
